@@ -213,6 +213,15 @@ func (w *world) handle(m msg) {
 		return
 	}
 	switch m.Name {
+	case "SMSG_LOGIN_VERIFY_WORLD", "SMSG_NEW_WORLD", "SMSG_LOGOUT_COMPLETE":
+		// The client drops every object here and the server sends them all again with new creates.
+		// Without this a relog (or a World.pkt holding several sessions) leaves a stale copy of each.
+		w.ents = map[codec.GUID]*ent{}
+		w.qstatus = map[codec.GUID]uint64{}
+		if m.Name == "SMSG_LOGOUT_COMPLETE" {
+			w.self, w.quests = codec.GUID{}, map[int]*quest{}
+		}
+		w.stats["world reset"]++
 	case "SMSG_UPDATE_OBJECT":
 		u, err := updateobject.Decode(m.Body)
 		if err != nil {
