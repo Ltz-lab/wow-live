@@ -142,7 +142,9 @@ func TestSlowClientDropped(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	// A real block never finishes; 15s leaves room for -race on a slow CI runner,
+	// where parsing these 50 MB alone takes several seconds.
+	case <-time.After(15 * time.Second):
 		t.Fatal("publish blocked on a slow client")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
