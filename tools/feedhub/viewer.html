@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Feed Hub</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #ffffff; --ink: #1d1c1a; --muted: #6f6b64; --line: #e4e1da;
+    --accent: #7b3fe4; --good: #1f8a5b; --bad: #c2412d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141317; --card: #1e1d23; --ink: #ecebef; --muted: #9a97a3; --line: #2e2c35;
+      --accent: #a98bff; --good: #4cc38a; --bad: #ff7a66; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; }
+  header { display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; padding: 20px 16px 8px; }
+  h1 { font-size: 18px; margin: 0; }
+  .stat { color: var(--muted); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); margin-right: 6px; }
+  .dot.on { background: var(--good); }
+  main { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; padding: 8px 16px 24px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; color: var(--accent); font-weight: 600; display: flex; justify-content: space-between; }
+  .card h2 span { color: var(--muted); font-weight: 400; }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .row:first-of-type { border-top: 0; }
+  .row b { font-weight: 500; }
+  .row i { font-style: normal; color: var(--muted); text-align: right; }
+  .wide { grid-column: 1 / -1; }
+  .ev { color: var(--muted); padding: 1px 0; overflow-wrap: anywhere; }
+  .ev b { color: var(--ink); font-weight: 500; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="dot" id="dot"></span>Feed Hub</h1>
+  <span class="stat" id="stat">connecting…</span>
+</header>
+<main id="cards">
+  <section class="card wide" id="events"><h2>Events <span id="rate"></span></h2><div id="evlist"></div></section>
+</main>
+<script>
+const cards = document.getElementById('cards'), evlist = document.getElementById('evlist');
+const stat = document.getElementById('stat'), dot = document.getElementById('dot'), rate = document.getElementById('rate');
+let lines = 0, lastSeq = null, gaps = 0, evTimes = [];
+
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function short(v) {
+  if (v == null) return '';
+  if (Array.isArray(v)) return v.map(x => typeof x === 'object' ? (x.name || x.spell || x.id || JSON.stringify(x)) : x).join(', ') || '(none)';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+// one row per item of the line's main list, or per field
+function rows(m) {
+  const list = m.queue || m.auras || m.cooldowns || m.powers;
+  if (Array.isArray(list)) {
+    if (!list.length) return [['(none)', '']];
+    return list.map(x => [x.name || x.spell || x.id || '', Object.entries(x)
+      .filter(([k]) => !['name', 'spell', 'id'].includes(k)).map(([k, v]) => k + ' ' + short(v)).join(' · ')]);
+  }
+  return Object.entries(m).filter(([k]) => !['v', 'seq', 'type', 'unit'].includes(k)).map(([k, v]) => [k, short(v)]);
+}
+function show(m) {
+  const key = m.type + (m.unit ? '/' + m.unit : '');
+  let card = document.getElementById('c-' + key);
+  if (!card) {
+    card = el('section', 'card'); card.id = 'c-' + key;
+    cards.insertBefore(card, document.getElementById('events'));
+  }
+  card.replaceChildren();
+  const h = el('h2', null, key); h.append(el('span', null, '#' + m.seq)); card.append(h);
+  for (const [k, v] of rows(m)) { const r = el('div', 'row'); r.append(el('b', null, k), el('i', null, v)); card.append(r); }
+}
+function event(m) {
+  const d = el('div', 'ev'); d.append(el('b', null, m.sub || 'event'), ' ' + [m.src_name || m.src, '→', m.dst_name || m.dst, m.spell_name || m.spell || '', m.amount ?? ''].filter(x => x !== '' && x != null).join(' '));
+  evlist.prepend(d); while (evlist.childElementCount > 30) evlist.lastChild.remove();
+  const now = performance.now(); evTimes.push(now); while (evTimes.length && now - evTimes[0] > 5000) evTimes.shift();
+  rate.textContent = (evTimes.length / 5).toFixed(1) + '/s';
+}
+function connect() {
+  const q = new URLSearchParams(location.search).get('token');
+  const ws = new WebSocket(`ws://${location.host}/feed` + (q ? '?token=' + encodeURIComponent(q) : ''));
+  ws.onopen = () => { dot.classList.add('on'); lastSeq = null; };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'hub') { lastSeq = m.seq; return; }
+    lines++;
+    if (lastSeq !== null) { if (m.seq > lastSeq + 1) gaps++; lastSeq = m.seq; }
+    if (m.type === 'event') event(m); else show(m);
+    stat.textContent = `${lines} lines · seq ${m.seq}` + (gaps ? ` · ${gaps} gaps` : '');
+  };
+  ws.onclose = e => { dot.classList.remove('on'); stat.textContent = `closed: ${e.reason || e.code} · retrying`; setTimeout(connect, 1500); };
+}
+connect();
+</script>
+</body>
+</html>

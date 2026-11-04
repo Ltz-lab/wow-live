@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# havoc-helper: play retail Havoc with the rotation helper over the game, in
+# one command.
+#
+#   tools/havoc-helper            record, decode, suggest, draw; quit the game to stop
+#   tools/havoc-helper --check    show what it would use and exit
+#
+# What runs:
+#   1. capture-live --game retail: the bnet relay, tcpdump of the world port,
+#      and the retail client (log in at the game's own screen, as usual).
+#   2. Once the run folder exists: combatfeed -run <run> -follow (decrypts the
+#      capture as it is written; combat events, auras, cooldowns, Fury)
+#      | wow-rotation <havoc toml> --feed (the Havoc priority list; adds
+#      "next" lines) | auraoverlay.py (the icon row, right to left, and the
+#      aura bars, drawn over the WoW window while it is in front), with
+#      wow-feed's feedhub between the rotation and the overlay: the same lines,
+#      "next" included, on ws://$HUB_ADDR/feed for dashboards and bots, and a
+#      live view at http://$HUB_ADDR/.
+#   3. When the game exits, capture-live stops and decrypts, and the overlay
+#      side is shut down with it. Ctrl-C stops everything.
+#
+# Where things come from (override with the environment variables):
+#   WOW_FEED      the repo root (default: this checkout): capture-live and combatfeed
+#   CAPTURE_LIVE  a capture-live that knows --game retail (default: the repo's)
+#   ROTATION      the rotation binary (default: this repo's target/release/wow-rotation)
+#   HAVOC_TOML    the rotation file (default rotations/havoc_fel_scarred.toml; keybinds: key = "...")
+#   HAVOC_HASTE   your gear haste as a fraction, for the pull (default 0.18)
+#   SPELLDATA     wago.tools CSVs for the retail build (fetched if missing)
+#   LIVE_DIR      where capture-live puts its runs
+#   HUB_ADDR      where feedhub listens (default 127.0.0.1:7373)
+# Logs of the overlay side: <run>/helper-*.log
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+WOW_FEED="${WOW_FEED:-$(cd "$HERE/.." && pwd)}"   # the repo root: capture-live, combatfeed, feedhub
+BUILD="12.1.5.70783"
+LIVE_DIR="${LIVE_DIR:-${WOW_LIVE_CAPTURES:-$WOW_FEED/captures}}"
+SPELLDATA="${SPELLDATA:-$WOW_FEED/data/db2/$BUILD}"
+ROTATION="${ROTATION:-$HERE/target/release/wow-rotation}"
+HAVOC_TOML="${HAVOC_TOML:-$HERE/rotations/havoc_fel_scarred.toml}"
+HUB_ADDR="${HUB_ADDR:-127.0.0.1:7373}"
+HAVOC_HASTE="${HAVOC_HASTE:-0.18}"  # gear haste until the first Eye Beam measures it (the author's, 2026-11-05: 18.2%)
+
+say() { printf '\033[1;35mhavoc-helper:\033[0m %s\n' "$*"; }
+die() { say "$*"; exit 1; }
+
+[[ -d "$WOW_FEED/tools/combatfeed" ]] || die "no tools/combatfeed under $WOW_FEED (set WOW_FEED to the repo root)"
+
+# a capture-live with --game
+if [[ -z "${CAPTURE_LIVE:-}" ]]; then
+  for c in "$WOW_FEED/tools/capture-live"; do
+    if [[ -x "$c" ]] && grep -q -- '--game' "$c"; then CAPTURE_LIVE="$c"; break; fi
+  done
+fi
+[[ -n "${CAPTURE_LIVE:-}" ]] || die "no capture-live with --game retail found; set CAPTURE_LIVE"
+
+[[ -f "$HAVOC_TOML" ]] || die "no rotation file at $HAVOC_TOML; set HAVOC_TOML"
+
+if [[ "${1:-}" == "--check" ]]; then
+  say "wow-feed:     $WOW_FEED ($(git -C "$WOW_FEED" log -1 --format=%h 2>/dev/null))"
+  say "capture-live: $CAPTURE_LIVE"
+  say "rotation:     $ROTATION ($([[ -x "$ROTATION" ]] && echo built || echo 'not built yet: cargo build --release'))"
+  say "spec:         $HAVOC_TOML (haste $HAVOC_HASTE)"
+  say "spell data:   $SPELLDATA ($(ls "$SPELLDATA"/*.csv 2>/dev/null | wc -l | tr -d ' ') CSVs)"
+  say "runs:         $LIVE_DIR"
+  say "feed hub:     ws://$HUB_ADDR/feed (live view http://$HUB_ADDR/)"
+  exit 0
+fi
+
+# the rotation, built once
+if [[ ! -x "$ROTATION" ]]; then
+  say "building the rotation (cargo build --release)"
+  (cd "$HERE" && cargo build --release) || die "rotation build failed"
+fi
+
+# spell tables for cooldowns, charges, the GCD and names, fetched once
+mkdir -p "$SPELLDATA"
+for t in SpellName SpellCooldowns SpellCategories SpellCategory; do
+  if [[ ! -s "$SPELLDATA/$t.csv" ]]; then
+    say "fetching $t.csv for $BUILD from wago.tools"
+    curl -fsS -A wow-forever -o "$SPELLDATA/$t.csv.part" "https://wago.tools/db2/$t/csv?build=$BUILD" \
+      && mv "$SPELLDATA/$t.csv.part" "$SPELLDATA/$t.csv" || die "could not fetch $t.csv"
+  fi
+done
+
+# the feed and the hub, built once per start so they match the wow-feed checkout
+FEED="$(mktemp -t combatfeed)"
+HUB="$(mktemp -t feedhub)"
+(cd "$WOW_FEED" && go build -o "$FEED" ./tools/combatfeed) || die "combatfeed build failed"
+(cd "$WOW_FEED" && go build -o "$HUB" ./tools/feedhub) || die "feedhub build failed"
+
+before="$(ls -1 "$LIVE_DIR" 2>/dev/null | sort | tail -1 || true)"
+PIPE_PID=""
+cleanup() {
+  if [[ -n "$PIPE_PID" ]]; then
+    pkill -P "$PIPE_PID" 2>/dev/null || true
+    kill "$PIPE_PID" 2>/dev/null || true
+  fi
+  rm -f "$FEED" "$HUB"
+}
+trap cleanup EXIT INT TERM
+
+# the overlay side waits for the new run folder, then follows it
+(
+  for _ in $(seq 1 600); do
+    run="$(ls -1 "$LIVE_DIR" 2>/dev/null | sort | tail -1 || true)"
+    [[ -n "$run" && "$run" != "$before" ]] && break
+    sleep 0.5
+  done
+  [[ -n "$run" && "$run" != "$before" ]] || exit 0
+  dir="$LIVE_DIR/$run"
+  say "overlay following $dir (it shows over the game while WoW is in front)"
+  say "feed on ws://$HUB_ADDR/feed, live view http://$HUB_ADDR/"
+  "$FEED" -run "$dir" -follow -spelldata "$SPELLDATA" 2>"$dir/helper-feed.log" \
+    | "$ROTATION" "$HAVOC_TOML" --feed --next 4 --haste "$HAVOC_HASTE" 2>"$dir/helper-rotation.log" \
+    | "$HUB" -ws "$HUB_ADDR" 2>"$dir/helper-hub.log" \
+    | python3 "$HERE/tools/auraoverlay/auraoverlay.py" --rotation 2>"$dir/helper-overlay.log"
+) &
+PIPE_PID=$!
+
+"$CAPTURE_LIVE" --game retail

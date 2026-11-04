@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>World Radar</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0f14; --panel: rgba(16,22,30,.82); --line: rgba(255,255,255,.08);
+    --text: #e6edf3; --dim: #8b98a5;
+    --self: #ffd166; --player: #4cc9f0; --unit: #f78c6b; --go: #7bd389; --other: #b392f0;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.4 Inter, system-ui, -apple-system, sans-serif; overflow: hidden; }
+  #view { position: fixed; inset: 0; }
+  .num { font-variant-numeric: tabular-nums; }
+  #hud { position: fixed; top: 16px; left: 16px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px 14px; backdrop-filter: blur(8px); min-width: 220px; }
+  #hud h1 { margin: 0 0 6px; font-size: 14px; font-weight: 600; letter-spacing: .02em; }
+  #hud .row { display: flex; justify-content: space-between; gap: 16px; color: var(--dim); }
+  #hud .row b { color: var(--text); font-weight: 500; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; color: var(--dim); }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+  #list { position: fixed; top: 16px; right: 16px; width: 280px; max-height: calc(100% - 32px); overflow: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(8px); }
+  #list .it { display: grid; grid-template-columns: 10px 1fr auto; gap: 8px; align-items: center;
+    padding: 6px 12px; border-bottom: 1px solid var(--line); }
+  #list .it i { width: 9px; height: 9px; border-radius: 50%; }
+  #list .sub { color: var(--dim); font-size: 11px; }
+  #labels { position: fixed; inset: 0; pointer-events: none; }
+  .lbl { position: absolute; transform: translate(-50%, -140%); white-space: nowrap; font-size: 11px;
+    padding: 1px 6px; border-radius: 6px; background: rgba(0,0,0,.55); color: var(--text); }
+  .lbl.player { color: var(--player); } .lbl.unit { color: var(--unit); } .lbl.gameobject { color: var(--go); }
+  .lbl.hostile { color: #ff4840; font-weight: 700; } .lbl.herb { color: #59f273; } .lbl.ore { color: #f29e4c; }
+  #controls { position: fixed; left: 16px; bottom: 16px; display: flex; gap: 8px; }
+  button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+  button.on { border-color: var(--self); color: var(--self); }
+  @media (max-width: 640px) { #list { display: none; } }
+</style>
+</head>
+<body>
+<div id="view"></div>
+<div id="labels"></div>
+<div id="hud">
+  <h1>World Radar</h1>
+  <div class="row">Map <b class="num" id="map">–</b></div>
+  <div class="row">Position <b class="num" id="pos">waiting for movement…</b></div>
+  <div class="row">Around us <b class="num" id="count">0</b></div>
+  <div class="row">Moving <b class="num" id="moving">0</b></div>
+  <div class="row">Stream clock <b class="num" id="clock">–</b></div>
+  <div class="legend">
+    <span><i style="background:var(--self)"></i>us</span>
+    <span><i style="background:var(--player)"></i>players</span>
+    <span><i style="background:var(--unit)"></i>creatures</span>
+    <span><i style="background:var(--go)"></i>objects</span>
+  </div>
+</div>
+<div id="list"></div>
+<div id="controls">
+  <button id="bFollow" class="on">Follow facing</button>
+  <button id="bTop">Top down</button>
+  <button id="bLabels" class="on">Labels</button>
+  <button id="bObjects" class="on">Objects</button>
+</div>
+
+<div id="warn" style="display:none;position:fixed;top:14px;left:50%;transform:translateX(-50%);padding:8px 16px;border-radius:8px;
+  background:rgba(40,8,8,.85);color:#ff6b62;font:700 15px/1.2 system-ui,sans-serif;font-variant-numeric:tabular-nums;z-index:10"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+// WoW: X north, Y west, Z up. Scene: x east (-Y), z south (-X), y up (Z).
+const C = { self: 0xffd166, player: 0x4cc9f0, hostile: 0xff4840, unit: 0xf78c6b, gameobject: 0x7bd389, herb: 0x59f273, ore: 0xf29e4c, other: 0xb392f0 };
+const view = document.getElementById('view'), labels = document.getElementById('labels');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio); view.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x0b0f14);
+scene.fog = new THREE.Fog(0x0b0f14, 220, 420);
+const camera = new THREE.PerspectiveCamera(55, 1, 0.5, 2000);
+camera.position.set(0, 70, 90);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.maxPolarAngle = Math.PI * 0.49;
+scene.add(new THREE.HemisphereLight(0xbfd7ff, 0x202830, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 0.6); sun.position.set(50, 100, 30); scene.add(sun);
+
+// The ground: rings and a grid that ride along under us.
+const ground = new THREE.Group(); scene.add(ground);
+const grid = new THREE.GridHelper(500, 50, 0x23303d, 0x161e27); ground.add(grid);
+for (const r of [20, 40, 100, 200]) {
+  const g = new THREE.RingGeometry(r - 0.15, r + 0.15, 128);
+  const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0x2f4152, side: THREE.DoubleSide }));
+  m.rotation.x = -Math.PI / 2; m.position.y = 0.02; ground.add(m);
+}
+const north = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 0.05, -205), 0, 0x8b98a5);
+ground.add(north);
+
+const geo = {
+  self: new THREE.ConeGeometry(1.4, 4, 16),
+  player: new THREE.ConeGeometry(1.1, 3.2, 12),
+  hostile: new THREE.ConeGeometry(1.5, 4.2, 12),
+  herb: new THREE.OctahedronGeometry(1.1),
+  ore: new THREE.BoxGeometry(1.4, 1.4, 1.4),
+  unit: new THREE.SphereGeometry(1.0, 16, 12),
+  gameobject: new THREE.BoxGeometry(1.2, 1.2, 1.2),
+  other: new THREE.OctahedronGeometry(0.8),
+};
+const mats = {}; for (const k in C) mats[k] = new THREE.MeshStandardMaterial({ color: C[k], roughness: .5, emissive: C[k], emissiveIntensity: .25 });
+const stalkMat = new THREE.LineBasicMaterial({ color: 0x3a4a5a, transparent: true, opacity: .6 });
+const pathMat = new THREE.LineDashedMaterial({ color: 0xf78c6b, dashSize: 1, gapSize: .7, transparent: true, opacity: .85 });
+
+const objs = new Map(); // guid -> {mesh, stalk, path, label, target, cur}
+let self = null, origin = null, opts = { follow: true, top: false, labels: true, objects: true };
+
+function kindOf(o) { if (o.hostile) return 'hostile'; return C[o.k] !== undefined ? o.k : 'other'; }
+function toScene(o, out) { // relative to the origin (us)
+  out.set(-(o.y - origin.y), o.z - origin.z, -(o.x - origin.x)); return out;
+}
+function make(o) {
+  const k = kindOf(o), mesh = new THREE.Mesh(geo[k], mats[k]);
+  if (k === 'player' || k === 'self' || k === 'hostile') mesh.rotation.x = -Math.PI / 2; // cones point along facing
+  const holder = new THREE.Group(); holder.add(mesh); scene.add(holder);
+  const sg = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  const stalk = new THREE.Line(sg, stalkMat); scene.add(stalk);
+  const pg = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  const path = new THREE.Line(pg, pathMat); path.visible = false; scene.add(path);
+  const label = document.createElement('div'); label.className = 'lbl ' + k; labels.appendChild(label);
+  return { holder, mesh, stalk, path, label, cur: new THREE.Vector3(), target: new THREE.Vector3(), first: true, k };
+}
+function drop(g) {
+  const r = objs.get(g); if (!r) return;
+  scene.remove(r.holder, r.stalk, r.path); r.label.remove(); objs.delete(g);
+}
+
+function title(o) {
+  if (o.n) return o.n;
+  if (o.k === 'unit') return 'Creature ' + o.e;
+  if (o.k === 'gameobject') return 'Object ' + o.e;
+  if (o.k === 'player') return 'Player';
+  if (o.k === 'herb' || o.k === 'ore') return o.n;
+  return o.k;
+}
+
+let last = null;
+async function poll() {
+  try {
+    const r = await fetch('/state', { cache: 'no-store' }); last = await r.json();
+  } catch (e) { /* the server restarts: keep polling */ }
+  setTimeout(poll, 100);
+}
+poll();
+
+const tmp = new THREE.Vector3();
+function apply(s) {
+  document.getElementById('map').textContent = s.map;
+  document.getElementById('clock').textContent = s.clock;
+  if (!s.self) return;
+  self = s.self;
+  origin = origin || { x: self.x, y: self.y, z: self.z };
+  // Keep the origin on us: shift everything when we move far.
+  origin.x = self.x; origin.y = self.y; origin.z = self.z;
+  document.getElementById('pos').textContent = `${self.x.toFixed(1)}, ${self.y.toFixed(1)}, ${self.z.toFixed(1)}`;
+  // node spots that are up, gathered or last seen up (live nodes are drawn as their spot)
+  const spots = (s.nodes || []).filter(n => n.st === 'up' || n.st === 'gone' || n.st === 'seen').map(n => ({
+    g: `node:${n.x}:${n.y}`, k: n.k, x: n.x, y: n.y, z: n.hz ? n.z : self.z, o: 0,
+    n: n.st === 'up' ? n.n : `${n.n} · ${n.st === 'gone' ? (n.eta ? 'back in ' + clock(n.eta) : 'gathered ' + clock(n.ago) + ' ago') : 'seen ' + clock(n.ago || 0) + ' ago'}`,
+  }));
+  const isNode = o => o.k === 'gameobject' && (s.nodes || []).some(n => n.st === 'up' && Math.abs(n.x - o.x) < 8 && Math.abs(n.y - o.y) < 8);
+  const all = [{ ...self, g: 'self' }].concat((s.objects || []).filter(o => !isNode(o)), spots);
+  const warn = (s.threats || []).filter(t => t.warn)[0];
+  const wb = document.getElementById('warn');
+  wb.style.display = warn ? '' : 'none';
+  if (warn) wb.textContent = `⚠ ${warn.lvl || '?'} ${warn.race || ''} ${warn.cls || ''} · ${warn.d.toFixed(0)} yd${warn.close > 1 ? ' · closing ' + warn.close.toFixed(0) + ' yd/s' : ''}`;
+  const seen = new Set();
+  let moving = 0;
+  for (const o of all) {
+    if (!opts.objects && o.k === 'gameobject') continue;
+    seen.add(o.g);
+    let r = objs.get(o.g); if (!r) { r = make(o); objs.set(o.g, r); }
+    toScene(o, r.target);
+    if (r.first) { r.cur.copy(r.target); r.first = false; }
+    r.o = o;
+    if (o.m) {
+      moving++;
+      const a = r.target, b = toScene({ x: o.tx, y: o.ty, z: o.tz }, tmp.clone());
+      r.path.geometry.setFromPoints([a, b]); r.path.computeLineDistances(); r.path.visible = true;
+    } else r.path.visible = false;
+  }
+  for (const g of [...objs.keys()]) if (!seen.has(g)) drop(g);
+  document.getElementById('count').textContent = (s.objects || []).length;
+  document.getElementById('moving').textContent = moving;
+  list(s.objects || []);
+}
+
+function list(os) {
+  const near = os.map(o => ({ o, d: Math.hypot(o.x - self.x, o.y - self.y), h: o.z - self.z }))
+    .sort((a, b) => a.d - b.d).slice(0, 40);
+  document.getElementById('list').innerHTML = near.map(({ o, d, h }) => {
+    const col = '#' + C[kindOf(o)].toString(16).padStart(6, '0');
+    const sub = o.m ? `moving · arrives in ${o.eta.toFixed(1)}s` : (o.k === 'gameobject' ? 'object' : o.k);
+    return `<div class="it"><i style="background:${col}"></i><div>${esc(title(o))}<div class="sub">${sub}</div></div>
+      <div class="num" style="text-align:right">${d.toFixed(0)} yd<div class="sub num">${h >= 0 ? '+' : ''}${h.toFixed(0)}</div></div></div>`;
+  }).join('');
+}
+function clock(sec) { sec = Math.round(sec); return sec >= 600 ? Math.floor(sec / 60) + 'm' : Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0'); }
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]); }
+
+let applied = null;
+function frame() {
+  requestAnimationFrame(frame);
+  if (last && last !== applied) { apply(last); applied = last; }
+  const W = innerWidth, H = innerHeight;
+  if (renderer.domElement.width !== W * devicePixelRatio) { renderer.setSize(W, H); camera.aspect = W / H; camera.updateProjectionMatrix(); }
+  for (const [g, r] of objs) {
+    r.cur.lerp(r.target, 0.25);
+    r.holder.position.copy(r.cur).add(new THREE.Vector3(0, r.k === 'gameobject' ? 0.6 : 1.2, 0));
+    const fac = r.o ? r.o.o : 0;
+    r.holder.rotation.y = fac; // WoW facing 0 = north (+X) = scene -z, counterclockwise
+    const p = r.stalk.geometry.attributes.position;
+    p.setXYZ(0, r.cur.x, r.cur.y, r.cur.z); p.setXYZ(1, r.cur.x, 0, r.cur.z); p.needsUpdate = true;
+    // Labels
+    if (opts.labels && r.o) {
+      tmp.copy(r.holder.position).project(camera);
+      const vis = tmp.z < 1 && Math.abs(tmp.x) < 1.1 && Math.abs(tmp.y) < 1.1 && r.cur.length() < 160;
+      r.label.style.display = vis ? '' : 'none';
+      if (vis) {
+        r.label.style.left = ((tmp.x + 1) / 2 * W) + 'px'; r.label.style.top = ((1 - tmp.y) / 2 * H) + 'px';
+        const t = g === 'self' ? 'You' : title(r.o);
+        if (r.label.textContent !== t) r.label.textContent = t;
+      }
+    } else r.label.style.display = 'none';
+  }
+  if (self && opts.follow && !opts.top) {
+    const back = 60, up = 40, f = self.o;
+    // behind us: facing f points toward scene (-sin f, -cos f) in (x,z)
+    const dx = Math.sin(f), dz = Math.cos(f);
+    camera.position.lerp(new THREE.Vector3(dx * back, up, dz * back), 0.08);
+    controls.target.set(0, 0, 0);
+  }
+  if (opts.top) { camera.position.lerp(new THREE.Vector3(0, 260, 0.01), 0.1); controls.target.set(0, 0, 0); }
+  controls.update();
+  renderer.render(scene, camera);
+}
+frame();
+
+function toggle(id, key, after) {
+  const b = document.getElementById(id);
+  b.onclick = () => { opts[key] = !opts[key]; b.classList.toggle('on', opts[key]); after && after(); };
+}
+toggle('bFollow', 'follow'); toggle('bTop', 'top'); toggle('bLabels', 'labels');
+toggle('bObjects', 'objects', () => { for (const [g, r] of objs) if (r.k === 'gameobject') drop(g); });
+</script>
+</body>
+</html>

@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2329  # cleanup and decrypt run from the EXIT trap
+# capture-live: record the stock client on Blizzard's live servers in one
+# command, decrypt its world connections, and put the machine back as it was.
+#
+#   tools/capture-live                 live US (us.actual.battle.net)
+#   tools/capture-live -region eu      live EU
+#   tools/capture-live --dry-run       print each step, change nothing
+#   tools/capture-live --game retail   the retail client (Midnight) instead of
+#                                      Forever; RelayPortal.wtf is made from
+#                                      its Config.wtf, UDP is recorded too
+#                                      (QUIC), see docs/RETAIL.md
+#   tools/capture-live --decrypt <run> step 8 again on an earlier run's folder
+#
+# This is EVIDENCE E45 done by hand, in order:
+#   1. preflight: game not running, sudo works (tcpdump), /etc/hosts maps the
+#      portal to 127.0.0.1 and ForeverLauncher.wtf exists (connect-client.sh)
+#   2. free :1119: stop the fork's bnetserver (tmux tc-bnet), remembering it
+#   3. build and start tools/bnetrelay on 127.0.0.1:1119 -> <region>.actual.battle.net
+#   4. sudo tcpdump the world port (3724) into <run>/world.pcap
+#   5. start the client through the Agent relay (no key patch), Agent.dat
+#      51655 until the game is on the relay, then 51654 again
+#   6. wait until the game exits (log in at the game's own login screen)
+#   7. cleanup, also on Ctrl-C: stop relay and tcpdump, Agent.dat = 51654,
+#      restart tc-bnet if it was running
+#   8. tools/worlddecrypt the capture, print its summary and the top 20
+#      messages per connection
+#
+# A run lives in captures/<timestamp>/ in this repo, or $WOW_LIVE_CAPTURES (mode 0700:
+# secrets.jsonl holds the session's world keys; never commit it).
+#
+# Testing without live (does not touch tc-bnet or the game):
+#   tools/capture-live --no-game --listen 127.0.0.1:11190 --upstream 127.0.0.1:1119 --insecure
+# runs steps 1-4 and 7-8 against the local fork and waits for Ctrl-C instead
+# of the game.
+set -uo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+TC="${WOW_TC:-$HOME/Dev/wow-forever-tc}"  # optional: a local TrinityCore fork whose bnetserver is paused while recording
+CAPTURES="${WOW_LIVE_CAPTURES:-$REPO/captures}"
+CERTS="${WOW_LIVE_CERTS:-$REPO/certs}"   # made by setup/connect-client.sh
+GAME_KIND=forever
+AGENT_RELAY="$REPO/tools/agent_relay.py"
+AGENT_RELAY_LOG="${TMPDIR:-/tmp}/agent_relay.log"
+AGENT_DAT=/Users/Shared/Battle.net/Agent/Agent.dat
+PORTAL=trinity.actual.battle.net
+
+REGION=us
+LISTEN=127.0.0.1:1119
+UPSTREAM=""
+INSECURE=0
+DRY=0
+NO_GAME=0
+DECRYPT_ONLY=""
+
+usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --game) GAME_KIND="${2:?}"; shift 2 ;;
+    -region|--region) REGION="${2:?}"; shift 2 ;;
+    --upstream) UPSTREAM="${2:?}"; shift 2 ;;
+    --listen) LISTEN="${2:?}"; shift 2 ;;
+    --insecure) INSECURE=1; shift ;;
+    -n|--dry-run) DRY=1; shift ;;
+    --no-game) NO_GAME=1; shift ;;
+    --decrypt) DECRYPT_ONLY="${2:?}"; shift 2 ;;
+    -h|--help) usage 0 ;;
+    *) echo "capture-live: unknown argument $1" >&2; usage 2 ;;
+  esac
+done
+case "$REGION" in us|eu|kr|tw) ;; *) echo "capture-live: -region us|eu|kr|tw" >&2; exit 2 ;; esac
+[[ -n "$UPSTREAM" ]] || UPSTREAM="$REGION.actual.battle.net:1119"
+LISTEN_PORT="${LISTEN##*:}"
+case "$GAME_KIND" in
+  forever) WOW="${WOW_FOREVER_DIR:-/Applications/World of Warcraft/_forever_}"; WTF=ForeverLauncher.wtf
+           PCAP_FILTER='tcp port 3724'; BUILD=70755 ;;
+  retail)  WOW="${WOW_RETAIL_DIR:-/Applications/World of Warcraft/_retail_}"; WTF=RelayPortal.wtf
+           # QUIC is open (README): keep every UDP flow but DNS/mDNS as well as TCP 3724.
+           PCAP_FILTER='tcp port 3724 or (udp and not port 53 and not port 5353)'; BUILD=70783 ;;
+  *) echo "capture-live: --game forever|retail" >&2; exit 2 ;;
+esac
+GAME="$WOW/World of Warcraft.app/Contents/MacOS/World of Warcraft"
+
+RUN="$CAPTURES/$(date +%Y%m%d-%H%M%S)"
+BIN="$RUN/bin"
+
+step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+say()  { printf '   %s\n' "$*"; }
+die()  { printf '\033[31mcapture-live: %s\033[0m\n' "$*" >&2; exit 1; }
+# do: run a command, or in a dry run print it.
+do_() {
+  if (( DRY )); then printf '   $ %s\n' "$*"; else "$@"; fi
+}
+# check: a preflight condition; fatal for real, reported in a dry run.
+check() {
+  local msg="$1"; shift
+  if "$@"; then say "ok: $msg"
+  elif (( DRY )); then say "WOULD FAIL: $msg"
+  else die "$msg"
+  fi
+}
+alive() { ps -p "$1" >/dev/null 2>&1; }  # works for root processes too (kill -0 does not)
+listening() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
+detach() {  # start "$@" in its own session (Ctrl-C here does not reach it); print its pid
+  python3 -c 'import subprocess, sys
+p = subprocess.Popen(sys.argv[2:], start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=open(sys.argv[1], "ab"), stderr=subprocess.STDOUT)
+print(p.pid)' "$@"
+}
+
+# ---------------------------------------------------------------- state
+TC_BNET_WAS=0
+RELAY_PID=""
+TCPDUMP_PID=""
+GAME_PID=""
+AGENT_DAT_TOUCHED=0
+CLEANED=0
+
+cleanup() {
+  (( CLEANED )) && return
+  CLEANED=1
+  (( DRY )) && return
+  step "7. cleanup"
+  if [[ -n "$TCPDUMP_PID" ]]; then
+    # tcpdump runs as root: signal it through sudo; SIGINT flushes the capture.
+    sudo -n pkill -INT -P "$TCPDUMP_PID" tcpdump 2>/dev/null || sudo -n kill -INT "$TCPDUMP_PID" 2>/dev/null
+    for _ in $(seq 1 20); do alive "$TCPDUMP_PID" || break; sleep 0.25; done
+    sudo -n chown "$(id -u):$(id -g)" "$RUN/world.pcap" 2>/dev/null
+    say "tcpdump stopped ($(du -h "$RUN/world.pcap" 2>/dev/null | cut -f1) captured)"
+  fi
+  if [[ -n "$RELAY_PID" ]]; then
+    kill "$RELAY_PID" 2>/dev/null
+    for _ in $(seq 1 20); do kill -0 "$RELAY_PID" 2>/dev/null || break; sleep 0.25; done
+    say "bnetrelay stopped"
+  fi
+  if (( AGENT_DAT_TOUCHED )) && [[ "$(cat "$AGENT_DAT" 2>/dev/null)" != 51654 ]]; then
+    printf 51654 > "$AGENT_DAT" && say "Agent.dat back to 51654"
+  fi
+  if [[ -n "$GAME_PID" ]] && kill -0 "$GAME_PID" 2>/dev/null; then
+    say "the game is still running (pid $GAME_PID); it was left alone"
+  fi
+  if (( TC_BNET_WAS )); then
+    "$TC/start.sh" >/dev/null && say "tc-bnet restarted (start.sh)"
+  fi
+  decrypt
+}
+
+decrypt() {
+  step "8. decrypt"
+  local secrets="" pcap="" s
+  for s in "$RUN"/bnet/*/secrets.jsonl "$RUN"/*/secrets.jsonl; do [[ -s "$s" ]] && secrets="$s"; done
+  for s in "$RUN"/world*.pcap; do [[ -s "$s" ]] && pcap="$s"; done
+  if [[ -z "$pcap" ]]; then say "no capture in $RUN"; return; fi
+  if [[ -z "$secrets" || ! -s "$secrets" ]]; then
+    say "no world secrets recorded (the client never joined a realm through the relay); capture kept in $RUN"
+    return
+  fi
+  "$BIN/worlddecrypt" -build "$BUILD" -pcap "$pcap" -secrets "$secrets" -out "$RUN/decrypted" 2>&1 | sed 's/^/   /'
+  local f
+  for f in "$RUN"/decrypted/conn-*.jsonl; do
+    [[ -s "$f" ]] || continue
+    printf '\n   %s: %s messages\n' "$(basename "$f" .jsonl)" "$(wc -l < "$f" | tr -d ' ')"
+    jq -r '"\(.dir) \(.name)"' "$f" | sort | uniq -c | sort -rn | head -20 | sed 's/^/     /'
+  done
+  printf '\n   run: %s\n' "$RUN"
+}
+
+if [[ -n "$DECRYPT_ONLY" ]]; then  # step 8 again, on an earlier run's folder
+  RUN="$(cd "$DECRYPT_ONLY" && pwd)" || exit 1
+  BIN="$(mktemp -d)"
+  (cd "$REPO" && go build -o "$BIN/worlddecrypt" ./tools/worlddecrypt) || die "building worlddecrypt failed"
+  decrypt
+  rm -rf "$BIN"
+  exit 0
+fi
+
+trap 'cleanup' EXIT
+trap 'echo; say "interrupted"; exit 130' INT TERM
+
+(( DRY )) && echo "capture-live: DRY RUN (nothing is started, stopped or written)"
+echo "capture-live: upstream $UPSTREAM, relay on $LISTEN, run $RUN"
+
+# ---------------------------------------------------------------- 1. preflight
+step "1. preflight"
+if (( ! NO_GAME )); then
+  check "the game is not running" bash -c '! pgrep -x "World of Warcraft" >/dev/null'
+  check "$GAME exists" test -x "$GAME"
+  if [[ "$GAME_KIND" == retail && ! -f "$WOW/WTF/$WTF" ]]; then
+    # Same trick as connect-client.sh: a separate config whose portal is the
+    # name the fork's trusted certificate is valid for. Config.wtf is untouched.
+    if (( DRY )); then say "\$ grep -v '^SET portal ' Config.wtf + SET portal \"$PORTAL\" > $WOW/WTF/$WTF"
+    else { grep -v '^SET portal ' "$WOW/WTF/Config.wtf"; echo "SET portal \"$PORTAL\""; } > "$WOW/WTF/$WTF" && say "wrote $WOW/WTF/$WTF"; fi
+  fi
+  (( DRY )) && [[ "$GAME_KIND" == retail ]] || check "$WTF exists (else: sudo setup/connect-client.sh --game $GAME_KIND)" test -f "$WOW/WTF/$WTF"
+  check "/etc/hosts has 127.0.0.1 $PORTAL (else: sudo setup/connect-client.sh)" grep -qE "^127\.0\.0\.1[[:space:]]+$PORTAL" /etc/hosts
+  check "Agent relay script exists ($AGENT_RELAY)" test -f "$AGENT_RELAY"
+  check "certificates exist in $CERTS (else: sudo setup/connect-client.sh)" test -f "$CERTS/server.chain.pem"
+  check "Agent.dat is writable" test -w "$AGENT_DAT"
+fi
+check "sudo works without a password (tcpdump needs it; run 'sudo -v' first)" sudo -n true
+check "go, jq and python3 are installed" bash -c 'command -v go jq python3 >/dev/null'
+
+# ---------------------------------------------------------------- 2. free :1119
+step "2. free :$LISTEN_PORT"
+if [[ "$LISTEN_PORT" == 1119 ]] && tmux has-session -t tc-bnet 2>/dev/null; then
+  TC_BNET_WAS=1
+  say "the fork's bnetserver (tmux tc-bnet) is running; stopping it (restarted at the end)"
+  do_ tmux kill-session -t tc-bnet
+  (( DRY )) || for _ in $(seq 1 20); do listening "$LISTEN_PORT" || break; sleep 0.25; done
+else
+  say "tc-bnet not running (or not on this port): nothing to stop"
+fi
+if (( ! DRY )) && listening "$LISTEN_PORT"; then
+  die ":$LISTEN_PORT is still taken: $(lsof -nP -iTCP:"$LISTEN_PORT" -sTCP:LISTEN | tail -n +2)"
+fi
+
+# ---------------------------------------------------------------- 3. bnetrelay
+step "3. build and start bnetrelay"
+do_ mkdir -p "$BIN"
+do_ chmod 700 "$CAPTURES"
+do_ chmod 700 "$RUN"
+(cd "$REPO" && do_ go build -o "$BIN/bnetrelay" ./tools/bnetrelay) || die "building bnetrelay failed"
+(cd "$REPO" && do_ go build -o "$BIN/worlddecrypt" ./tools/worlddecrypt) || die "building worlddecrypt failed"
+RELAY_ARGS=(-listen "$LISTEN" -upstream "$UPSTREAM" -out "$RUN/bnet" -cert "$CERTS/server.chain.pem" -key "$CERTS/server.key.pem")
+(( INSECURE )) && RELAY_ARGS+=(-insecure)
+if (( DRY )); then
+  say "\$ $BIN/bnetrelay ${RELAY_ARGS[*]}  >$RUN/bnetrelay.log 2>&1 &"
+else
+  RELAY_PID="$(detach "$RUN/bnetrelay.log" "$BIN/bnetrelay" "${RELAY_ARGS[@]}")"
+  for _ in $(seq 1 40); do listening "$LISTEN_PORT" && break; kill -0 "$RELAY_PID" 2>/dev/null || break; sleep 0.25; done
+  listening "$LISTEN_PORT" || die "bnetrelay did not start: $(tail -5 "$RUN/bnetrelay.log")"
+  say "bnetrelay pid $RELAY_PID on $LISTEN -> $UPSTREAM (log $RUN/bnetrelay.log)"
+fi
+
+# ---------------------------------------------------------------- 4. tcpdump
+step "4. tcpdump the world port"
+TCPDUMP=(sudo -n tcpdump -i any -s 0 -U -w "$RUN/world.pcap" "$PCAP_FILTER")
+if (( DRY )); then
+  say "\$ ${TCPDUMP[*]}  >$RUN/tcpdump.log 2>&1 &"
+else
+  # A plain background job, not detached: sudo's ticket belongs to this terminal.
+  "${TCPDUMP[@]}" >"$RUN/tcpdump.log" 2>&1 &
+  TCPDUMP_PID=$!
+  for _ in $(seq 1 20); do [[ -e "$RUN/world.pcap" ]] && break; sleep 0.25; done
+  alive "$TCPDUMP_PID" || die "tcpdump did not start: $(cat "$RUN/tcpdump.log")"
+  say "tcpdump (sudo pid $TCPDUMP_PID) -> $RUN/world.pcap"
+fi
+
+# ---------------------------------------------------------------- 5. the client
+if (( NO_GAME )); then
+  step "5-6. --no-game: not starting the client; Ctrl-C to stop"
+  (( DRY )) || while :; do sleep 1; done
+  exit 0
+fi
+
+step "5. start the client through the Agent relay (no key patch)"
+if ! listening 51655; then
+  say "Agent relay not on 51655: starting it"
+  if (( DRY )); then
+    say "\$ python3 $AGENT_RELAY --log $AGENT_RELAY_LOG  (own session)"
+  else
+    detach /dev/null python3 "$AGENT_RELAY" --log "$AGENT_RELAY_LOG" >/dev/null
+    for _ in $(seq 1 20); do listening 51655 && break; sleep 0.25; done
+    listening 51655 || die "the Agent relay did not start"
+  fi
+else
+  say "Agent relay already on 51655"
+fi
+AGENT_DAT_TOUCHED=1
+if (( DRY )); then say "\$ printf 51655 > $AGENT_DAT"; else printf 51655 > "$AGENT_DAT"; fi
+if (( DRY )); then
+  say "\$ cd \"$WOW\" && \"$GAME\" -config $WTF  >$RUN/client.log 2>&1 (own session)"
+  say "wait until the game has an ESTABLISHED connection to 51655 (90 s), then printf 51654 > $AGENT_DAT"
+else
+  GAME_PID="$(cd "$WOW" && detach "$RUN/client.log" "$GAME" -config "$WTF")"
+  say "client pid $GAME_PID"
+  for _ in $(seq 1 90); do
+    lsof -a -nP -p "$GAME_PID" -iTCP:51655 2>/dev/null | grep -q ESTABLISHED && break
+    kill -0 "$GAME_PID" 2>/dev/null || break
+    sleep 1
+  done
+  printf 51654 > "$AGENT_DAT"
+  if lsof -a -nP -p "$GAME_PID" -iTCP:51655 2>/dev/null | grep -q ESTABLISHED; then
+    say "game is on the Agent relay; Agent.dat back to 51654"
+  else
+    say "game did not connect to the Agent relay (it may spin this session); Agent.dat back to 51654"
+  fi
+fi
+
+# ---------------------------------------------------------------- 6. wait
+step "6. recording"
+printf '\n   \033[1;32m>>> Log in in the game now. Quit the game when done (Ctrl-C here stops the recording). <<<\033[0m\n\n'
+if (( ! DRY )); then
+  while kill -0 "$GAME_PID" 2>/dev/null; do sleep 2; done
+  say "the game exited"
+else
+  say "wait until pid exits"
+  step "7. cleanup (on exit or Ctrl-C)"
+  say "stop tcpdump (sudo kill -INT) and bnetrelay; chown world.pcap; Agent.dat = 51654"
+  say "restart tc-bnet with $TC/start.sh if it was running (it was: $( tmux has-session -t tc-bnet 2>/dev/null && echo yes || echo no))"
+  step "8. decrypt"
+  say "\$ $BIN/worlddecrypt -build $BUILD -pcap $RUN/world.pcap -secrets $RUN/bnet/<relay run>/secrets.jsonl -out $RUN/decrypted"
+  say "then per connection: message count and the top 20 (dir, name)"
+fi
+exit 0
