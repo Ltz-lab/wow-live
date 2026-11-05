@@ -31,7 +31,7 @@ import (
 
 func main() {
 	home, _ := os.UserHomeDir()
-	opcodesH := flag.String("opcodes-h", filepath.Join(envOr("WOW_TC", filepath.Join(home, "Dev/wow-forever-tc")), "TrinityCore/src/server/game/Server/Protocol/Opcodes.h"), "the fork's Opcodes.h, to name a World.pkt's numbers")
+	opcodesH := flag.String("opcodes-h", filepath.Join(envOr("WOW_TC", filepath.Join(home, "Dev/wow/server/wow-forever-tc")), "TrinityCore/src/server/game/Server/Protocol/Opcodes.h"), "the fork's Opcodes.h, to name a World.pkt's numbers")
 	db := flag.String("db", envOr("WOW_FOREVER_DB", filepath.Join(home, "Dev/wow/host/data/forever.db")), "forever.db for spell names (empty: ids only)")
 	spellCSV := flag.String("spells", "", "SpellName.csv (ID,Name_lang), e.g. from wago.tools/db2/SpellName/csv?build=12.1.5.70783 for retail; overrides -db")
 	stats := flag.Bool("stats", false, "print event and failure counts only")

@@ -66,7 +66,7 @@ func main() {
 	start := flag.Float64("start", 0, "skip messages before this many seconds into the log")
 	replay := flag.Float64("replay", 0, "play a finished log back at this speed (1 = real time)")
 	poll := flag.Duration("poll", 50*time.Millisecond, "with -follow: the longest wait for new data (on macOS the feed wakes the moment the file grows)")
-	opcodesH := flag.String("opcodes-h", filepath.Join(envOr("WOW_TC", filepath.Join(home, "Dev/wow-forever-tc")), "TrinityCore/src/server/game/Server/Protocol/Opcodes.h"), "the fork's Opcodes.h (names a World.pkt's numbers)")
+	opcodesH := flag.String("opcodes-h", filepath.Join(envOr("WOW_TC", filepath.Join(home, "Dev/wow/server/wow-forever-tc")), "TrinityCore/src/server/game/Server/Protocol/Opcodes.h"), "the fork's Opcodes.h (names a World.pkt's numbers)")
 	spellsCSV := flag.String("spells", "", "a wago.tools SpellName.csv (ID,Name_lang) for spell names, e.g. retail's")
 	spellData := flag.String("spelldata", "", "a directory of wago.tools CSVs (SpellCooldowns, SpellCategories, SpellCategory, SpellName) for cooldowns, charges and the GCD")
 	db := flag.String("db", envOr("WOW_FOREVER_DB", filepath.Join(home, "Dev/wow/host/data/forever.db")), "forever.db for spell names")

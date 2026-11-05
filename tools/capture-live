@@ -36,7 +36,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-TC="${WOW_TC:-$HOME/Dev/wow-forever-tc}"  # optional: a local TrinityCore fork whose bnetserver is paused while recording
+TC="${WOW_TC:-$HOME/Dev/wow/server/wow-forever-tc}"  # optional: a local TrinityCore fork whose bnetserver is paused while recording
 CAPTURES="${WOW_LIVE_CAPTURES:-$REPO/captures}"
 CERTS="${WOW_LIVE_CERTS:-$REPO/certs}"   # made by setup/connect-client.sh
 GAME_KIND=forever

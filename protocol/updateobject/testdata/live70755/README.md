@@ -1,6 +1,6 @@
 # Two SMSG_UPDATE_OBJECT bodies from the live 70755 session
 
-Cut from `~/Dev/wow-forever-tc/captures/2026-11-05-live-goldshire-70755.pkt`
+Cut from `~/Dev/wow/server/wow-forever-tc/captures/2026-11-05-live-goldshire-70755.pkt`
 (29 minutes of the stock 70755 client in Goldshire on the private local
 TrinityCore fork; the log itself is not committed). File names are the
 log's packet indices; each file is the message body, without the opcode:

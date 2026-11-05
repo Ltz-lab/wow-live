@@ -650,7 +650,7 @@ func main() {
 	follow := flag.Bool("follow", false, "keep reading as the capture grows")
 	jsonl := flag.String("jsonl", "", "replay worlddecrypt output instead (comma-separated conn-*.jsonl)")
 	pkt := flag.String("pkt", "", "a TrinityCore World.pkt (the local fork), with -follow to tail it")
-	opcodesH := flag.String("opcodes-h", filepath.Join(envOr("WOW_TC", filepath.Join(os.Getenv("HOME"), "Dev/wow-forever-tc")), "TrinityCore/src/server/game/Server/Protocol/Opcodes.h"), "the fork's Opcodes.h (names a World.pkt's numbers)")
+	opcodesH := flag.String("opcodes-h", filepath.Join(envOr("WOW_TC", filepath.Join(os.Getenv("HOME"), "Dev/wow/server/wow-forever-tc")), "TrinityCore/src/server/game/Server/Protocol/Opcodes.h"), "the fork's Opcodes.h (names a World.pkt's numbers)")
 	speed := flag.Float64("speed", 1, "replay speed (0: as fast as possible)")
 	build := flag.Int("build", 70783, "client build (opcode names)")
 	addr := flag.String("addr", "127.0.0.1:8791", "where to serve the radar")

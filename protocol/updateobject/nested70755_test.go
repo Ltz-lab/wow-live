@@ -32,8 +32,8 @@ import (
 // captures are the frozen sessions, outside the repository; tests that
 // need them skip when they are absent.
 var captures = []struct{ name, path string }{
-	{"live", "~/Dev/wow-forever-tc/captures/2026-11-05-live-goldshire-70755.pkt"},
-	{"old", "~/Dev/wow-forever-tc/captures/2026-11-04-goldshire-70755.pkt"},
+	{"live", "~/Dev/wow/server/wow-forever-tc/captures/2026-11-05-live-goldshire-70755.pkt"},
+	{"old", "~/Dev/wow/server/wow-forever-tc/captures/2026-11-04-goldshire-70755.pkt"},
 }
 
 const forkUpdateObject = 0x5c0000 // the fork's numbering in its logs

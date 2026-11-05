@@ -33,7 +33,7 @@
     "server": 293,
     "server_count": 1
    },
-   "read_from": "~/Dev/wow-forever-tc/server/etc/worldserver.conf"
+   "read_from": "~/Dev/wow/server/wow-forever-tc/server/etc/worldserver.conf"
   }
  },
  "counts": {
