@@ -19,7 +19,7 @@ import (
 )
 
 // The stock 70755 client's world entry on the local fork
-// (~/Dev/wow/server/wow-forever-tc/captures/2026-11-04-goldshire-70755.pkt).
+// (~/wow/server/wow-forever-tc/captures/2026-11-04-goldshire-70755.pkt).
 const (
 	// #190 SMSG_CONNECT_TO, 45 bytes.
 	captureConnectTo = "010000001100000001010000009baaecd54600014600000000017f000001951f00000008000000000000000000"

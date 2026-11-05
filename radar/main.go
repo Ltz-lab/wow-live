@@ -650,7 +650,7 @@ func main() {
 	follow := flag.Bool("follow", false, "keep reading as the capture grows")
 	jsonl := flag.String("jsonl", "", "replay worlddecrypt output instead (comma-separated conn-*.jsonl)")
 	pkt := flag.String("pkt", "", "a TrinityCore World.pkt (the local fork), with -follow to tail it")
-	opcodesH := flag.String("opcodes-h", filepath.Join(envOr("WOW_TC", filepath.Join(os.Getenv("HOME"), "Dev/wow/server/wow-forever-tc")), "TrinityCore/src/server/game/Server/Protocol/Opcodes.h"), "the fork's Opcodes.h (names a World.pkt's numbers)")
+	opcodesH := flag.String("opcodes-h", filepath.Join(envOr("WOW_TC", filepath.Join(os.Getenv("HOME"), "wow/server/wow-forever-tc")), "TrinityCore/src/server/game/Server/Protocol/Opcodes.h"), "the fork's Opcodes.h (names a World.pkt's numbers)")
 	speed := flag.Float64("speed", 1, "replay speed (0: as fast as possible)")
 	build := flag.Int("build", 70783, "client build (opcode names)")
 	addr := flag.String("addr", "127.0.0.1:8791", "where to serve the radar")
@@ -659,7 +659,7 @@ func main() {
 	nodeRadius := flag.Float64("node-radius", 400, "yards around us to list node spots")
 	vis := flag.Float64("vis", 90, "yards inside which the server shows every node that is up")
 	seen := flag.String("seen", filepath.Join(os.Getenv("HOME"), ".config/wow-radar/seen.json"), "where gathered/empty times and respawns are kept between sessions (live only); \"\" for nowhere")
-	fdb := flag.String("db", "", "forever.db for creature, object and quest names (default with -pkt or a Forever -build: $WOW_FOREVER_DB, else ~/Dev/wow/host/data/forever.db; \"-\" for none)")
+	fdb := flag.String("db", "", "forever.db for creature, object and quest names (default with -pkt or a Forever -build: $WOW_FOREVER_DB, else ~/wow/host/data/forever.db; \"-\" for none)")
 	wdb := flag.String("wdb", filepath.Join(envOr("WOW_RETAIL_DIR", "/Applications/World of Warcraft/_retail_"), "Cache/WDB/enUS"), "the client's name caches")
 	flag.Parse()
 
@@ -695,7 +695,7 @@ func main() {
 		loadWDB(filepath.Join(*wdb, "gameobjectcache.wdb"), w.goNames), *wdb)
 
 	if *fdb == "" && (*pkt != "" || *build != 70783) {
-		*fdb = envOr("WOW_FOREVER_DB", filepath.Join(os.Getenv("HOME"), "Dev/wow/host/data/forever.db"))
+		*fdb = envOr("WOW_FOREVER_DB", filepath.Join(os.Getenv("HOME"), "wow/host/data/forever.db"))
 	}
 	if *fdb != "" && *fdb != "-" {
 		if n, o, q, err := loadForeverDB(*fdb, w); err != nil {

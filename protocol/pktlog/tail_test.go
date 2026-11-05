@@ -8,7 +8,7 @@ import (
 
 // Tail over a file written in small pieces gives what ReadPKT gives at once.
 func TestTailMatchesReadPKT(t *testing.T) {
-	src := filepath.Join(os.Getenv("HOME"), "Dev/wow/server/wow-forever-tc/captures/2026-11-04-goldshire-70755.pkt")
+	src := filepath.Join(os.Getenv("HOME"), "wow/server/wow-forever-tc/captures/2026-11-04-goldshire-70755.pkt")
 	raw, err := os.ReadFile(src)
 	if err != nil {
 		t.Skip("no fork capture here:", err)

@@ -53,7 +53,7 @@ def fit(rows):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default=os.environ.get("WOW_FOREVER_DB", os.path.expanduser("~/Dev/wow/host/data/forever.db")))
+    ap.add_argument("--db", default=os.environ.get("WOW_FOREVER_DB", os.path.expanduser("~/wow/host/data/forever.db")))
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "nodes.json"))
     ap.add_argument("--max-rms", type=float, default=5.0, help="skip zones whose fit is worse than this (yards)")
     a = ap.parse_args()
