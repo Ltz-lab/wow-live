@@ -7,5 +7,7 @@ nodes.json
 secrets.jsonl
 /rotation/target
 captures/
-certs/
+certs
 data/
+capture.log
+logs/
