@@ -1,5 +1,7 @@
 # wow-live
 
+[![ci](https://github.com/Ltz-lab/wow-live/actions/workflows/ci.yml/badge.svg)](https://github.com/Ltz-lab/wow-live/actions/workflows/ci.yml)
+
 Live WoW game state from the stock client's own network traffic, and the tools built on it.
 The traffic is recorded and decrypted as it is written, then turned into JSON lines that any
 tool can read. Nothing is injected into the game process or reads its memory. Works with retail (Midnight 12.1.5) and
@@ -48,6 +50,7 @@ secrets so the world connection can be decrypted. Recordings go to `captures/<ti
 
 # the feed by itself
 tools/capture-live --game retail                       # relay + tcpdump + the game; quit the game to stop
+tools/capture-live --launcher                          # Forever started from Battle.net, which signs the game in
 go run ./tools/combatfeed -run captures/<run> -follow -spelldata <wago CSVs>
 
 # the radar on a run that is recording, then http://127.0.0.1:8791
@@ -56,7 +59,8 @@ claude mcp add --transport http wow-radar http://127.0.0.1:8791/mcp   # let Clau
 ```
 
 See [rotation/README.md](rotation/README.md), [rotation/HAVOC.md](rotation/HAVOC.md) and
-[radar/README.md](radar/README.md) for each part.
+[radar/README.md](radar/README.md) for each part, and [IDEAS.md](IDEAS.md) for what else could be
+built on the feed.
 
 ## Feed lines
 
@@ -77,7 +81,7 @@ dashboards, Discord bots, hardware displays. Lines that filters earlier in the p
 such as the rotation's `next`, are served too.
 
 ```bash
-combatfeed ... | wow-rotation <rotation.toml> --feed | go run ./tools/feedhub | auraoverlay.py --rotation
+combatfeed ... | wow-rotation <rotation.toml> --feed | go run ./tools/feedhub | rotation/tools/auraoverlay/auraoverlay.py --rotation
 ```
 
 | endpoint (default `127.0.0.1:7373`) | what |
