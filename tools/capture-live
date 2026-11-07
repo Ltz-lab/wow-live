@@ -11,6 +11,11 @@
 #                                      its Config.wtf, UDP is recorded too
 #                                      (QUIC), see docs/RETAIL.md
 #   tools/capture-live --decrypt <run> step 8 again on an earlier run's folder
+#   tools/capture-live --launcher      Forever through Battle.net (launch-wow), so the
+#                                      game signs in by itself: no login screen. Battle.net's
+#                                      login ignores the portal and goes to
+#                                      <region>.actual.battle.net:1119, so /etc/hosts maps that
+#                                      name here only until the realm join is recorded
 #
 # This is EVIDENCE E45 done by hand, in order:
 #   1. preflight: game not running, sudo works (tcpdump), /etc/hosts maps the
@@ -52,6 +57,10 @@ INSECURE=0
 DRY=0
 NO_GAME=0
 DECRYPT_ONLY=""
+LAUNCHER=0
+LAUNCH_WOW="${WOW_DIR:-$HOME/wow}/.claude/skills/launch-wow/launch.sh"
+HOSTS_MARK="# capture-live --launcher (temp)"
+HOSTS_TOUCHED=0
 
 usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 while [[ $# -gt 0 ]]; do
@@ -64,6 +73,7 @@ while [[ $# -gt 0 ]]; do
     -n|--dry-run) DRY=1; shift ;;
     --no-game) NO_GAME=1; shift ;;
     --decrypt) DECRYPT_ONLY="${2:?}"; shift 2 ;;
+    --launcher) LAUNCHER=1; shift ;;
     -h|--help) usage 0 ;;
     *) echo "capture-live: unknown argument $1" >&2; usage 2 ;;
   esac
@@ -116,6 +126,12 @@ GAME_PID=""
 AGENT_DAT_TOUCHED=0
 CLEANED=0
 
+flush_dns() { sudo -n dscacheutil -flushcache; sudo -n killall -HUP mDNSResponder 2>/dev/null; }
+hosts_off() {  # drop the --launcher line from /etc/hosts
+  grep -qF "$HOSTS_MARK" /etc/hosts || return 0
+  sudo -n sed -i '' "/$HOSTS_MARK/d" /etc/hosts && flush_dns && say "/etc/hosts: removed the temporary $LAUNCH_NAME line"
+}
+
 cleanup() {
   (( CLEANED )) && return
   CLEANED=1
@@ -133,6 +149,7 @@ cleanup() {
     for _ in $(seq 1 20); do kill -0 "$RELAY_PID" 2>/dev/null || break; sleep 0.25; done
     say "bnetrelay stopped"
   fi
+  (( HOSTS_TOUCHED )) && hosts_off
   if (( AGENT_DAT_TOUCHED )) && [[ "$(cat "$AGENT_DAT" 2>/dev/null)" != 51654 ]]; then
     printf 51654 > "$AGENT_DAT" && say "Agent.dat back to 51654"
   fi
@@ -223,6 +240,22 @@ do_ chmod 700 "$RUN"
 (cd "$REPO" && do_ go build -o "$BIN/worlddecrypt" ./tools/worlddecrypt) || die "building worlddecrypt failed"
 RELAY_ARGS=(-listen "$LISTEN" -upstream "$UPSTREAM" -out "$RUN/bnet" -cert "$CERTS/server.chain.pem" -key "$CERTS/server.key.pem")
 (( INSECURE )) && RELAY_ARGS+=(-insecure)
+if (( LAUNCHER )); then
+  # Battle.net's login connects to the real name, which /etc/hosts points here during the
+  # launch, so the relay dials the address resolved now and needs a certificate for the name.
+  LAUNCH_NAME="${UPSTREAM%:*}"
+  UP_IP="$(dig +short "$LAUNCH_NAME" | grep -E '^[0-9.]+$' | head -1)"
+  [[ -n "$UP_IP" ]] || die "could not resolve $LAUNCH_NAME"
+  LCERT="$CERTS/$LAUNCH_NAME.chain.pem"; LKEY="$CERTS/$LAUNCH_NAME.key.pem"
+  if [[ ! -f "$LCERT" ]] && (( ! DRY )); then
+    ( cd "$CERTS" && openssl req -new -nodes -newkey rsa:2048 -subj "/CN=$LAUNCH_NAME" -keyout "$LKEY" -out l.csr 2>/dev/null &&
+      printf 'subjectAltName=DNS:%s\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n' "$LAUNCH_NAME" > l.ext &&
+      openssl x509 -req -in l.csr -CA ca.cert.pem -CAkey ca.key.pem -CAserial ca.srl -days 825 -sha256 -extfile l.ext -out l.cert.pem 2>/dev/null &&
+      cat l.cert.pem ca.cert.pem > "$LCERT" && rm -f l.csr l.ext l.cert.pem && chmod 600 "$LCERT" "$LKEY" ) || die "making a certificate for $LAUNCH_NAME failed"
+    say "made $LCERT (signed by the local CA)"
+  fi
+  RELAY_ARGS=(-listen "$LISTEN" -upstream "$UP_IP:${UPSTREAM##*:}" -sni "$LAUNCH_NAME" -out "$RUN/bnet" -cert "$LCERT" -key "$LKEY")
+fi
 if (( DRY )); then
   say "\$ $BIN/bnetrelay ${RELAY_ARGS[*]}  >$RUN/bnetrelay.log 2>&1 &"
 else
@@ -253,6 +286,29 @@ if (( NO_GAME )); then
   exit 0
 fi
 
+if (( LAUNCHER )); then
+  step "5. start the client through Battle.net (launch-wow), $LAUNCH_NAME -> this relay"
+  if (( DRY )); then
+    say "\$ echo '127.0.0.1 $LAUNCH_NAME $HOSTS_MARK' | sudo tee -a /etc/hosts; flush DNS"
+    say "\$ $LAUNCH_WOW; wait for the realm join in $RUN/bnet/*/secrets.jsonl (90 s); remove the hosts line"
+  else
+    HOSTS_TOUCHED=1
+    printf '127.0.0.1 %s %s\n' "$LAUNCH_NAME" "$HOSTS_MARK" | sudo -n tee -a /etc/hosts >/dev/null || die "could not edit /etc/hosts"
+    flush_dns
+    bash "$LAUNCH_WOW" || die "launch-wow failed"
+    GAME_PID="$(pgrep -f "$GAME" | head -1)"
+    [[ -n "$GAME_PID" ]] || die "the game did not start"
+    say "client pid $GAME_PID"
+    for _ in $(seq 1 90); do
+      grep -qs RealmJoin "$RUN"/bnet/*/secrets.jsonl && break
+      kill -0 "$GAME_PID" 2>/dev/null || break
+      sleep 1
+    done
+    hosts_off; HOSTS_TOUCHED=0
+    if grep -qs RealmJoin "$RUN"/bnet/*/secrets.jsonl; then say "realm join recorded: the world connection will decrypt"
+    else say "no realm join recorded in 90 s: this session will not decrypt (no feed)"; fi
+  fi
+else
 step "5. start the client through the Agent relay (no key patch)"
 if ! listening 51655; then
   say "Agent relay not on 51655: starting it"
@@ -286,9 +342,11 @@ else
     say "game did not connect to the Agent relay (it may spin this session); Agent.dat back to 51654"
   fi
 fi
+fi
 
 # ---------------------------------------------------------------- 6. wait
 step "6. recording"
+(( LAUNCHER )) && printf '\n   \033[1;32m>>> Signed in by Battle.net. Quit the game when done (Ctrl-C here stops the recording). <<<\033[0m\n\n' ||
 printf '\n   \033[1;32m>>> Log in in the game now. Quit the game when done (Ctrl-C here stops the recording). <<<\033[0m\n\n'
 if (( ! DRY )); then
   while kill -0 "$GAME_PID" 2>/dev/null; do sleep 2; done
